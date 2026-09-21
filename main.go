@@ -40,22 +40,45 @@ func main() {
 }
 
 func readOptions() (options, error) {
+	return readOptionsFrom(os.Args[1:], os.Getenv, "client.conf")
+}
+
+func readOptionsFrom(args []string, getenv func(string) string, defaultConfigPath string) (options, error) {
 	var o options
-	flag.StringVar(&o.chatURL, "chat-url", "http://127.0.0.1:10008", "openim-chat 业务服务地址")
-	flag.StringVar(&o.apiURL, "api-url", "http://127.0.0.1:10002", "OpenIM API 地址")
-	flag.StringVar(&o.wsURL, "ws-url", "ws://127.0.0.1:10001", "OpenIM WebSocket 地址")
-	flag.StringVar(&o.credentials.PhoneNumber, "phone", os.Getenv("OPENIM_PHONE"), "手机号（也可用 OPENIM_PHONE）")
-	flag.StringVar(&o.credentials.AreaCode, "area-code", "+86", "国际区号")
-	flag.StringVar(&o.credentials.PasswordMode, "password-mode", "md5", "密码提交格式：md5 或 plain")
-	flag.IntVar(&o.credentials.Platform, "platform", defaultPlatform(), "平台 ID，必须与签发 imToken 的平台一致")
-	flag.StringVar(&o.dataDir, "data-dir", "./data", "SDK 数据库和日志目录，请勿多进程共用")
-	flag.DurationVar(&o.timeout, "timeout", 60*time.Second, "请求及首次同步的等待时间")
-	flag.BoolVar(&o.loginOnly, "login-only", false, "只进行业务登录并打印 token")
-	flag.Parse()
-	// 密码从环境变量读取，不写入源码，也不需要放进命令行参数。
-	o.credentials.Password = os.Getenv("OPENIM_PASSWORD")
+	phone, password := getenv("OPENIM_PHONE"), getenv("OPENIM_PASSWORD")
+	chatURL, apiURL, wsURL := "http://127.0.0.1:10008", "http://127.0.0.1:10002", "ws://127.0.0.1:10001"
+	configPath, loadConfig, err := configFileForArgs(args, defaultConfigPath)
+	if err != nil {
+		return o, err
+	}
+	if loadConfig {
+		config, err := loadClientConfig(configPath)
+		if err != nil {
+			return o, err
+		}
+		phone, password = config["OPENIM_PHONE"], config["OPENIM_PASSWORD"]
+		chatURL, apiURL, wsURL = config["chat-url"], config["api-url"], config["ws-url"]
+	}
+
+	flags := flag.NewFlagSet("openim_client_v1", flag.ContinueOnError)
+	flags.StringVar(&configPath, "c", configPath, "配置文件路径（不传任何参数时默认读取 client.conf）")
+	flags.StringVar(&o.chatURL, "chat-url", chatURL, "openim-chat 业务服务地址")
+	flags.StringVar(&o.apiURL, "api-url", apiURL, "OpenIM API 地址")
+	flags.StringVar(&o.wsURL, "ws-url", wsURL, "OpenIM WebSocket 地址")
+	flags.StringVar(&o.credentials.PhoneNumber, "phone", phone, "手机号（也可用 OPENIM_PHONE）")
+	flags.StringVar(&o.credentials.AreaCode, "area-code", "+86", "国际区号")
+	flags.StringVar(&o.credentials.PasswordMode, "password-mode", "md5", "密码提交格式：md5 或 plain")
+	flags.IntVar(&o.credentials.Platform, "platform", defaultPlatform(), "平台 ID，必须与签发 imToken 的平台一致")
+	flags.StringVar(&o.dataDir, "data-dir", "./data", "SDK 数据库和日志目录，请勿多进程共用")
+	flags.DurationVar(&o.timeout, "timeout", 60*time.Second, "请求及首次同步的等待时间")
+	flags.BoolVar(&o.loginOnly, "login-only", false, "只进行业务登录并打印 token")
+	if err := flags.Parse(args); err != nil {
+		return o, err
+	}
+	// 密码只从环境变量或配置文件读取，不写入源码，也不放进命令行参数。
+	o.credentials.Password = password
 	if strings.TrimSpace(o.credentials.PhoneNumber) == "" || o.credentials.Password == "" {
-		return o, fmt.Errorf("请通过 -phone 指定手机号，并设置 OPENIM_PASSWORD 环境变量；用 -h 查看帮助")
+		return o, fmt.Errorf("请在配置文件中设置 OPENIM_PHONE 和 OPENIM_PASSWORD，或通过 -phone 与 OPENIM_PASSWORD 指定账号；用 -h 查看帮助")
 	}
 	if o.timeout <= 0 {
 		return o, fmt.Errorf("timeout 必须大于 0")
@@ -90,6 +113,65 @@ func readOptions() (options, error) {
 	return o, nil
 }
 
+func configFileForArgs(args []string, defaultPath string) (string, bool, error) {
+	if len(args) == 0 {
+		return defaultPath, true, nil
+	}
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--":
+			return defaultPath, false, nil
+		case args[i] == "-c":
+			if i+1 == len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return "", false, fmt.Errorf("-c 必须指定配置文件路径")
+			}
+			return args[i+1], true, nil
+		case strings.HasPrefix(args[i], "-c="):
+			path := strings.TrimSpace(strings.TrimPrefix(args[i], "-c="))
+			if path == "" {
+				return "", false, fmt.Errorf("-c 必须指定配置文件路径")
+			}
+			return path, true, nil
+		}
+	}
+	return defaultPath, false, nil
+}
+
+func loadClientConfig(path string) (map[string]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取配置文件 %q：%w", path, err)
+	}
+	defer file.Close()
+
+	config := make(map[string]string)
+	scanner := bufio.NewScanner(file)
+	for lineNumber := 1; scanner.Scan(); lineNumber++ {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if !ok || key == "" {
+			return nil, fmt.Errorf("配置文件 %q 第 %d 行格式错误，应为 key=value", path, lineNumber)
+		}
+		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+			value = value[1 : len(value)-1]
+		}
+		switch key {
+		case "OPENIM_PHONE", "OPENIM_PASSWORD", "chat-url", "api-url", "ws-url":
+			config[key] = value
+		default:
+			return nil, fmt.Errorf("配置文件 %q 第 %d 行包含未知配置项 %q", path, lineNumber, key)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("读取配置文件 %q：%w", path, err)
+	}
+	return config, nil
+}
+
 func defaultPlatform() int {
 	switch runtime.GOOS {
 	case "darwin":
@@ -103,6 +185,9 @@ func defaultPlatform() int {
 
 func run() error {
 	o, err := readOptions()
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
