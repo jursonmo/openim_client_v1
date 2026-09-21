@@ -26,6 +26,30 @@ openim/
 
 ## 运行
 
+不传任何参数时，程序会读取当前目录的 `client.conf`：
+
+```bash
+go run .
+```
+
+也可以用 `-c` 指定其他配置文件：
+
+```bash
+go run . -c client.conf
+```
+
+配置文件格式如下，支持空行、行首空格和以 `#` 开头的注释：
+
+```text
+OPENIM_PHONE='13800138000'
+OPENIM_PASSWORD='你的登录密码'
+chat-url=http://127.0.0.1:10008
+api-url=http://127.0.0.1:10002
+ws-url=ws://127.0.0.1:10001
+```
+
+配置文件中的密码仍按 `-password-mode` 处理，默认为原始密码经过一次 MD5。显式传入的其他命令行参数会覆盖配置文件中的对应值。
+
 在本目录运行，把示例手机号和服务地址换成自己的值：
 
 ```bash
@@ -36,11 +60,6 @@ go run . \
   -chat-url http://127.0.0.1:10008 \
   -api-url http://127.0.0.1:10002 \
   -ws-url ws://127.0.0.1:10001
-
-  go run . \
-  -chat-url http://192.168.4.200:10008 \
-  -api-url http://192.168.4.200:10002 \
-  -ws-url ws://192.168.4.200:10001
 ```
 
 密码只从 `OPENIM_PASSWORD` 读取。也可以在终端隐藏输入密码，避免将密码写进历史：
@@ -91,6 +110,7 @@ go build -o openim_client_v1 .
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
+| `-c` | `client.conf` | 配置文件路径；无参数时自动读取默认文件 |
 | `-chat-url` | `http://127.0.0.1:10008` | 官方业务服务，不是 IM API |
 | `-api-url` | `http://127.0.0.1:10002` | IM HTTP API |
 | `-ws-url` | `ws://127.0.0.1:10001` | IM WebSocket |
